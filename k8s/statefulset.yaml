@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: trainer
+spec:
+  serviceName: trainer # must match your headless Service name
+  replicas: 2 # <-- if you change this, also change WORLD_SIZE below
+  selector:
+    matchLabels:
+      app: trainer
+  template:
+    metadata:
+      labels:
+        app: trainer
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: worker
+          image: dist-train:0.1 # built locally; remember to `kind load docker-image ...`
+          imagePullPolicy: IfNotPresent
+          # Run exactly one DDP process per pod; derive RANK from the pod's ordinal (trainer-0 -> 0, trainer-1 -> 1)
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              export RANK=${HOSTNAME##*-} ;
+              echo "RANK=$RANK WORLD_SIZE=$WORLD_SIZE MASTER=$MASTER_ADDR:$MASTER_PORT" ;
+              python train/train.py
+          env:
+            # Rendezvous target = ordinal 0 pod's stable DNS
+            - name: MASTER_ADDR
+              value: trainer-0.trainer
+            - name: MASTER_PORT
+              value: "29500"
+            # WORLD_SIZE must equal .spec.replicas
+            - name: WORLD_SIZE
+              value: "2"
+            # Training config
+            - name: TOTAL_STEPS
+              value: "500"
+            - name: BATCH
+              value: "512"
+            # Checkpoint directory (mounted PVC)
+            - name: CKPT_DIR
+              value: /mnt/ckpt
+          ports:
+            - name: dist
+              containerPort: 29500
+            - name: metrics
+              containerPort: 9000
+          volumeMounts:
+            - name: ckpt
+              mountPath: /mnt/ckpt
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      terminationGracePeriodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: ckpt
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
